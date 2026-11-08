@@ -1,0 +1,1112 @@
+"""
+التطبيق الشامل: 14 نوع وثيقة تربوية جاهزة + تصدير Word
+"""
+import os, sys, subprocess
+from datetime import datetime
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from docx import Document
+from docx.shared import Pt, Cm, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
+# ══════════════════════════════════════════════════════════════
+# أدوات RTL والعربية
+# ══════════════════════════════════════════════════════════════
+PPR_ORDER = ['pStyle','keepNext','keepLines','pageBreakBefore','framePr',
+             'widowControl','numPr','suppressLineNumbers','pBdr','shd','tabs',
+             'suppressAutoHyphens','kinsoku','wordWrap','overflowPunct',
+             'topLinePunct','autoSpaceDE','autoSpaceDN','bidi','adjustRightInd',
+             'snapToGrid','spacing','ind','contextualSpacing','mirrorIndents',
+             'suppressOverlap','jc','textDirection','textAlignment',
+             'textboxTightWrap','outlineLvl','divId','cnfStyle','rPr','sectPr']
+RPR_ORDER = ['rStyle','rFonts','b','bCs','i','iCs','caps','smallCaps','strike',
+             'dstrike','outline','shadow','emboss','imprint','noProof',
+             'snapToGrid','vanish','webHidden','color','spacing','w','kern',
+             'position','sz','szCs','highlight','u','effect','bdr','shd',
+             'fitText','vertAlign','rtl','cs','em','lang','eastAsianLayout',
+             'specVanish','oMath']
+TCPR_ORDER = ['cnfStyle','tcW','gridSpan','hMerge','vMerge','tcBorders','shd',
+              'noWrap','tcMar','textDirection','tcFitText','vAlign','hideMark']
+
+def sort_children(parent, order):
+    kids = list(parent)
+    def key(el):
+        tag = el.tag.split('}')[-1]
+        return order.index(tag) if tag in order else len(order)
+    for el in kids: parent.remove(el)
+    for el in sorted(kids, key=key): parent.append(el)
+
+def set_rtl(p, align=WD_ALIGN_PARAGRAPH.RIGHT):
+    pPr = p._p.get_or_add_pPr()
+    if pPr.find(qn('w:bidi')) is None:
+        pPr.append(OxmlElement('w:bidi'))
+    p.alignment = align
+    sort_children(pPr, PPR_ORDER)
+
+def R(run, name='Arial', size=14, bold=False, color=None):
+    run.font.name = name
+    run.font.size = Pt(size)
+    if bold: run.font.bold = True
+    if color is not None: run.font.color.rgb = color
+    rPr = run._r.get_or_add_rPr()
+    rF = rPr.find(qn('w:rFonts'))
+    if rF is None:
+        rF = OxmlElement('w:rFonts'); rPr.insert(0, rF)
+    for a in ('w:cs', 'w:ascii', 'w:hAnsi'):
+        rF.set(qn(a), name)
+    rPr.append(OxmlElement('w:rtl'))
+    s = OxmlElement('w:szCs'); s.set(qn('w:val'), str(int(size * 2))); rPr.append(s)
+    if bold: rPr.append(OxmlElement('w:bCs'))
+    if color is not None:
+        c = OxmlElement('w:color'); c.set(qn('w:val'), str(color).upper()); rPr.append(c)
+    sort_children(rPr, RPR_ORDER)
+
+def page_border(sec, hex_c, size=24, style='single'):
+    sp = sec._sectPr
+    if sp.find(qn('w:pgBorders')) is not None: return
+    pg = OxmlElement('w:pgBorders'); pg.set(qn('w:offsetFrom'), 'page')
+    for e in ('top','left','bottom','right'):
+        el = OxmlElement(f'w:{e}')
+        el.set(qn('w:val'), style); el.set(qn('w:sz'), str(size))
+        el.set(qn('w:space'), '24'); el.set(qn('w:color'), hex_c)
+        pg.append(el)
+    sp.append(pg)
+
+def hrule(p_or_doc, hex_c, size=12):
+    p = p_or_doc if hasattr(p_or_doc, '_p') else p_or_doc.add_paragraph()
+    pPr = p._p.get_or_add_pPr()
+    pB = OxmlElement('w:pBdr'); b = OxmlElement('w:bottom')
+    b.set(qn('w:val'), 'single'); b.set(qn('w:sz'), str(size))
+    b.set(qn('w:space'), '1');    b.set(qn('w:color'), hex_c)
+    pB.append(b); pPr.append(pB)
+    sort_children(pPr, PPR_ORDER)
+    return p
+
+def shade(cell, fill=None, margins=(60,80,60,80)):
+    tcPr = cell._tc.get_or_add_tcPr()
+    if fill:
+        shd = OxmlElement('w:shd')
+        shd.set(qn('w:val'),'clear'); shd.set(qn('w:color'),'auto')
+        shd.set(qn('w:fill'), fill); tcPr.append(shd)
+    tcM = OxmlElement('w:tcMar')
+    for edge, v in zip(['top','left','bottom','right'], margins):
+        el = OxmlElement(f'w:{edge}'); el.set(qn('w:w'), str(v))
+        el.set(qn('w:type'),'dxa'); tcM.append(el)
+    tcPr.append(tcM)
+    sort_children(tcPr, TCPR_ORDER)
+
+def ribbon(doc, text, fill_hex, text_hex='FFFFFF', size=18):
+    t = doc.add_table(rows=1, cols=1); t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    t.autofit = False; c = t.cell(0, 0); c.width = Cm(16.5)
+    shade(c, fill_hex, (80,100,80,100))
+    p = c.paragraphs[0]; p.text = ''
+    set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(text), size=size, bold=True, color=RGBColor.from_string(text_hex))
+    return t
+
+def open_file(path):
+    try:
+        if sys.platform == 'win32': os.startfile(path)
+        elif sys.platform == 'darwin': subprocess.call(['open', path])
+        else: subprocess.call(['xdg-open', path])
+    except Exception as e:
+        messagebox.showwarning("تنبيه", f"تعذر فتح الملف:\n{e}")
+
+def _new_doc(tpl, margins=(1.8, 1.8)):
+    doc = Document(); s = doc.sections[0]
+    s.top_margin = s.bottom_margin = Cm(margins[0])
+    s.left_margin = s.right_margin = Cm(margins[1])
+    if tpl.get('border_style'):
+        page_border(s, tpl['primary'], tpl.get('border_size', 24),
+                    tpl.get('border_style', 'single'))
+    return doc
+
+def _title(doc, text, color_hex, size=22):
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(text), size=size, bold=True, color=RGBColor.from_string(color_hex))
+    return p
+
+def _kv_table(doc, rows, tpl, col_widths=None):
+    n = len(rows[0])
+    t = doc.add_table(rows=len(rows), cols=n)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER; t.autofit = False
+    for r, row in enumerate(rows):
+        for c, v in enumerate(row):
+            cell = t.cell(r, c)
+            if col_widths: cell.width = Cm(col_widths[c])
+            cell.text = ''
+            is_key = (c % 2 == 0)
+            shade(cell, tpl.get('table_fill') if is_key else None, (40,60,40,60))
+            pp = cell.paragraphs[0]
+            set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+            R(pp.add_run(str(v)), size=12, bold=is_key,
+              color=RGBColor.from_string(tpl['primary']) if is_key else None)
+    return t
+
+# ══════════════════════════════════════════════════════════════
+# القوالب
+# ══════════════════════════════════════════════════════════════
+EXAM_TEMPLATES = [
+    {'id':'blue',  'name':'كلاسيكي أزرق','primary':'1F4E79','accent':'C9A227',
+     'header_style':'bar','border_style':'single','border_size':24,'table_fill':'EAF1F8'},
+    {'id':'green', 'name':'رسمي أخضر',  'primary':'2E7D32','accent':'F57F17',
+     'header_style':'double','border_style':'double','border_size':12,'table_fill':'E8F5E9'},
+    {'id':'purple','name':'عصري بنفسجي','primary':'6A1B9A','accent':'FF6F00',
+     'header_style':'bar','border_style':'single','border_size':30,'table_fill':'F3E5F5'},
+    {'id':'red',   'name':'قوي أحمر',   'primary':'B71C1C','accent':'000000',
+     'header_style':'plain','border_style':'single','border_size':24,'table_fill':'FFEBEE'},
+    {'id':'teal',  'name':'فيروزي',     'primary':'00695C','accent':'FFA000',
+     'header_style':'bar','border_style':'double','border_size':12,'table_fill':'E0F2F1'},
+    {'id':'black', 'name':'أسود بسيط',  'primary':'212121','accent':'757575',
+     'header_style':'plain','border_style':'single','border_size':20,'table_fill':None},
+]
+
+CERT_TEMPLATES = [
+    {'id':'gold',  'name':'ذهبي فاخر','primary':'C9A227','accent':'8B6914',
+     'title_bar':False,'border_style':'double','border_size':36,'name_style':'underline'},
+    {'id':'blue',  'name':'أزرق رسمي','primary':'1F4E79','accent':'C9A227',
+     'title_bar':True,'border_style':'single','border_size':24,'name_style':'bar'},
+    {'id':'green', 'name':'أخضر طبيعي','primary':'2E7D32','accent':'F57F17',
+     'title_bar':False,'border_style':'single','border_size':30,'name_style':'underline'},
+    {'id':'purple','name':'بنفسجي',   'primary':'6A1B9A','accent':'FF6F00',
+     'title_bar':True,'border_style':'double','border_size':24,'name_style':'bar'},
+    {'id':'red',   'name':'أحمر قوي', 'primary':'B71C1C','accent':'000000',
+     'title_bar':False,'border_style':'single','border_size':36,'name_style':'underline'},
+    {'id':'pink',  'name':'وردي ناعم', 'primary':'AD1457','accent':'F8BBD0',
+     'title_bar':True,'border_style':'single','border_size':24,'name_style':'bar'},
+]
+
+RECORD_TEMPLATES = [
+    {'id':'blue',  'name':'كلاسيكي أزرق','primary':'1F4E79','accent':'C9A227',
+     'border_style':'single','border_size':18,'table_fill':'EAF1F8'},
+    {'id':'green', 'name':'أخضر رسمي',  'primary':'2E7D32','accent':'F57F17',
+     'border_style':'single','border_size':18,'table_fill':'E8F5E9'},
+    {'id':'purple','name':'بنفسجي',     'primary':'6A1B9A','accent':'FF6F00',
+     'border_style':'single','border_size':18,'table_fill':'F3E5F5'},
+    {'id':'teal',  'name':'فيروزي',     'primary':'00695C','accent':'FFA000',
+     'border_style':'single','border_size':18,'table_fill':'E0F2F1'},
+]
+
+LETTER_TEMPLATES = [
+    {'id':'blue',  'name':'رسمي أزرق',     'primary':'1F4E79','accent':'C9A227','border_style':None},
+    {'id':'green', 'name':'أخضر رسمي',    'primary':'2E7D32','accent':'F57F17','border_style':None},
+    {'id':'black', 'name':'أسود كلاسيكي',  'primary':'212121','accent':'757575','border_style':None},
+    {'id':'red',   'name':'أحمر رسمي',    'primary':'B71C1C','accent':'000000','border_style':'single','border_size':12},
+]
+
+PRESET_EXAMS = {
+    'رياضيات – ابتدائي': [
+        {'type':'mcq','text':'ما ناتج ٥ × ٦ ؟','marks':2,'options':['30','36','25','42'],'answer':0},
+        {'type':'mcq','text':'أي مما يلي كسر مكافئ لـ ½ ؟','marks':2,'options':['2/3','3/6','4/5','2/5'],'answer':1},
+        {'type':'essay','text':'أوجد مساحة مستطيل طوله ٨ سم وعرضه ٥ سم.','marks':4,'lines':3},
+    ],
+    'علوم – متوسط': [
+        {'type':'mcq','text':'وحدة قياس القوة:','marks':2,'options':['نيوتن','جول','واط','أمبير'],'answer':0},
+        {'type':'mcq','text':'أقرب كوكب للشمس:','marks':2,'options':['الأرض','المشتري','عطارد','زحل'],'answer':2},
+        {'type':'essay','text':'اشرح قانون نيوتن الثاني.','marks':6,'lines':4},
+    ],
+    'لغة عربية': [
+        {'type':'mcq','text':'مرادف "سعيد":','marks':2,'options':['حزين','فرح','غاضب','خائف'],'answer':1},
+        {'type':'essay','text':'أعرب: "كتبَ الطالبُ الدرسَ".','marks':6,'lines':3},
+    ],
+    'إنجليزي': [
+        {'type':'mcq','text':'I ___ to school.','marks':2,'options':['go','goes','going','gone'],'answer':0},
+        {'type':'essay','text':'Write about your hobby.','marks':6,'lines':5},
+    ],
+}
+
+# ══════════════════════════════════════════════════════════════
+# بُناة الوثائق — الاختبارات
+# ══════════════════════════════════════════════════════════════
+def _exam_header(doc, d, tpl):
+    pr = RGBColor.from_string(tpl['primary']); ac = RGBColor.from_string(tpl['accent'])
+    st = tpl['header_style']
+    if st == 'bar':
+        ribbon(doc, d['school'], tpl['primary'], 'FFFFFF', 18)
+        p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+        p.paragraph_format.space_before = Pt(6)
+        R(p.add_run('ورقة امتحان'), size=22, bold=True, color=ac)
+        hrule(doc, tpl['primary'], 12)
+    elif st == 'double':
+        hrule(doc, tpl['primary'], 6); hrule(doc, tpl['primary'], 18)
+        _title(doc, d['school'], tpl['primary'], 18)
+        _title(doc, 'ورقة امتحان', tpl['accent'])
+        hrule(doc, tpl['primary'], 18); hrule(doc, tpl['primary'], 6)
+    else:
+        _title(doc, d['school'], tpl['primary'], 18)
+        _title(doc, 'ورقة امتحان', tpl['accent'])
+        hrule(doc, tpl['primary'], 12)
+    _kv_table(doc, [
+        ('المادة', d['subject'], 'الصف', d['grade']),
+        ('المدة', d['duration'], 'التاريخ', d['date']),
+    ], tpl, [4, 4.2, 4, 4.2])
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run('اسم الطالب: ___________________'), size=13)
+    R(p.add_run('     رقم الجلوس: _________'), size=13)
+    R(p.add_run(f"     الدرجة الكلية: {d['total']}"), size=13, bold=True, color=pr)
+    hrule(doc, tpl['primary'], 8)
+
+def _render_questions(doc, questions, tpl, show_answers=False, letters='أبجدهوزحط'):
+    pr = RGBColor.from_string(tpl['primary']); ac = RGBColor.from_string(tpl['accent'])
+    for i, q in enumerate(questions, 1):
+        p = doc.add_paragraph(); set_rtl(p)
+        p.paragraph_format.space_before = Pt(10)
+        R(p.add_run(f'السؤال {i}: '), size=13, bold=True, color=pr)
+        R(p.add_run(q['text']), size=13, bold=True)
+        R(p.add_run(f"   ({q['marks']})"), size=12, bold=True, color=ac)
+        if q['type'] == 'mcq':
+            for j, opt in enumerate(q['options']):
+                pp = doc.add_paragraph(); set_rtl(pp)
+                pp.paragraph_format.right_indent = Cm(1)
+                R(pp.add_run(f"({letters[j]}) {opt}"), size=12)
+            if show_answers:
+                ans = q.get('answer', 0)
+                pp = doc.add_paragraph(); set_rtl(pp)
+                pp.paragraph_format.right_indent = Cm(1)
+                R(pp.add_run(f"الإجابة الصحيحة: ({letters[ans]}) {q['options'][ans]}"),
+                  size=12, bold=True, color=RGBColor(0x00, 0x80, 0x00))
+        else:
+            for _ in range(q.get('lines', 3)):
+                pp = doc.add_paragraph(); set_rtl(pp)
+                pp.paragraph_format.right_indent = Cm(0.5)
+                R(pp.add_run('_' * 60), size=11, color=RGBColor(0x99,0x99,0x99))
+            if show_answers and q.get('model_answer'):
+                pp = doc.add_paragraph(); set_rtl(pp)
+                R(pp.add_run('الإجابة النموذجية: ' + q['model_answer']),
+                  size=12, bold=True, color=RGBColor(0x00, 0x80, 0x00))
+
+def build_exam(d, tpl):
+    doc = _new_doc(tpl)
+    _exam_header(doc, d, tpl)
+    _render_questions(doc, d['questions'], tpl, show_answers=False)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    p.paragraph_format.space_before = Pt(20)
+    R(p.add_run('— انتهت الأسئلة — بالتوفيق والنجاح —'),
+      size=12, bold=True, color=RGBColor.from_string(tpl['primary']))
+    return doc
+
+def build_answer_key(d, tpl):
+    doc = _new_doc(tpl)
+    _exam_header(doc, d, tpl)
+    # Replace title
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run('★  نموذج الإجابة النموذجية  ★'),
+      size=18, bold=True, color=RGBColor.from_string(tpl['accent']))
+    hrule(doc, tpl['primary'], 8)
+    _render_questions(doc, d['questions'], tpl, show_answers=True)
+    return doc
+
+def build_omr(d, tpl):
+    doc = _new_doc(tpl)
+    _exam_header(doc, d, tpl)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run('ورقة إجابة (املأ الدائرة المناسبة)'),
+      size=16, bold=True, color=RGBColor.from_string(tpl['accent']))
+    doc.add_paragraph()
+    # Table: # | Question short | أ | ب | ج | د
+    n = len(d['questions'])
+    t = doc.add_table(rows=n + 1, cols=6)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER; t.autofit = False
+    headers = ['#', 'السؤال', 'أ', 'ب', 'ج', 'د']
+    widths = [1, 8, 1.5, 1.5, 1.5, 1.5]
+    for c, (h, w) in enumerate(zip(headers, widths)):
+        cell = t.cell(0, c); cell.width = Cm(w); cell.text = ''
+        shade(cell, tpl['primary'], (60,40,60,40))
+        pp = cell.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+        R(pp.add_run(h), size=12, bold=True, color=RGBColor(0xFF,0xFF,0xFF))
+    for i, q in enumerate(d['questions'], 1):
+        row = t.rows[i]
+        cell0 = row.cells[0]; cell0.width = Cm(1); cell0.text = ''
+        pp = cell0.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+        R(pp.add_run(str(i)), size=12, bold=True, color=RGBColor.from_string(tpl['primary']))
+        cell1 = row.cells[1]; cell1.width = Cm(8); cell1.text = ''
+        pp = cell1.paragraphs[0]; set_rtl(pp)
+        R(pp.add_run(q['text'][:60]), size=11)
+        for j in range(4):
+            cell = row.cells[2 + j]; cell.width = Cm(1.5); cell.text = ''
+            pp = cell.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+            if q['type'] == 'mcq' and j < len(q['options']):
+                R(pp.add_run('○'), size=18, color=RGBColor.from_string(tpl['primary']))
+            else:
+                R(pp.add_run('—'), size=12, color=RGBColor(0xCC,0xCC,0xCC))
+    return doc
+
+# ══════════════════════════════════════════════════════════════
+# الشهادات (4 أنواع)
+# ══════════════════════════════════════════════════════════════
+CERT_TITLES = {
+    'thanks':        '❖  شهادة شكر وتقدير  ❖',
+    'excellence':    '★  شهادة تفوق وتميز  ★',
+    'participation': '✿  شهادة مشاركة  ✿',
+    'completion':    '⚜  شهادة إتمام  ⚜',
+}
+CERT_INTROS = {
+    'thanks':        'بخالص الشكر والتقدير إلى',
+    'excellence':    'بأسمى آيات الفخر والاعتزاز إلى الطالب المتميز',
+    'participation': 'بخالص الشكر والمشاركة الفعّالة إلى',
+    'completion':    'بكل فخر واعتزاز بمن أتم بنجاح إلى',
+}
+CERT_DEFAULT_BODY = {
+    'thanks':        'تقديراً لجهوده المتميزة في التحصيل الدراسي والسلوك الحسن خلال هذا العام.',
+    'excellence':    'نظراً لتفوقه الدراسي وحصوله على المرتبة الأولى على مستوى الصف، سائلين الله له دوام التوفيق.',
+    'participation': 'تقديراً لمشاركته الفعّالة وجهوده الطيبة في الأنشطة المدرسية المختلفة.',
+    'completion':    'بمناسبة إتمامه البرنامج التدريبي بنجاح، متمنين له مزيداً من التقدم.',
+}
+
+def build_cert(d, tpl, kind):
+    doc = _new_doc(tpl, margins=(2.5, 2.5))
+    pr = RGBColor.from_string(tpl['primary']); ac = RGBColor.from_string(tpl['accent'])
+    for _ in range(2): doc.add_paragraph()
+    title = CERT_TITLES[kind]
+    if tpl.get('title_bar'):
+        ribbon(doc, title, tpl['primary'], 'FFFFFF', 22)
+    else:
+        _title(doc, title, tpl['primary'], 28)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run('━' * 22), size=12, color=ac)
+    for _ in range(2): doc.add_paragraph()
+    _title(doc, f"تتقدم {d['org']} {CERT_INTROS[kind]}", tpl['primary'], 15)
+    doc.add_paragraph()
+    if tpl['name_style'] == 'bar':
+        ribbon(doc, d['name'], tpl['primary'], 'FFFFFF', 22)
+    else:
+        _title(doc, d['name'], tpl['primary'], 28)
+        p2 = doc.add_paragraph(); set_rtl(p2, WD_ALIGN_PARAGRAPH.CENTER)
+        hrule(p2, tpl['primary'], 12)
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(d['body']), size=14)
+    for _ in range(3): doc.add_paragraph()
+    _title(doc, f"التاريخ:  {d['date']}", tpl['primary'], 13)
+    for _ in range(2): doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run('التوقيع والختم:  ____________________'), size=13)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run('━' * 22), size=12, color=ac)
+    return doc
+
+# ══════════════════════════════════════════════════════════════
+# السجلات (4 أنواع)
+# ══════════════════════════════════════════════════════════════
+def _record_header(doc, d, tpl, title):
+    _title(doc, d['school'], tpl['primary'], 18)
+    _title(doc, title, tpl['accent'], 20)
+    hrule(doc, tpl['primary'], 12)
+    _kv_table(doc, [
+        ('الصف', d['class'], 'العام الدراسي', d.get('year', datetime.now().year)),
+    ], tpl, [3, 5.2, 3, 5.2])
+
+def build_attendance(d, tpl):
+    doc = _new_doc(tpl)
+    _record_header(doc, d, tpl, 'كشف الحضور والغياب')
+    days = d.get('days', 30)
+    students = [s.strip() for s in d['students'].split('\n') if s.strip()]
+    if not students: students = ['—']
+    cols = 3 + days + 2
+    t = doc.add_table(rows=len(students) + 2, cols=cols)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER; t.autofit = False
+    headers = ['#', 'اسم الطالب', 'اليوم'] + [str(i) for i in range(1, days+1)] + ['حاضر', 'غائب']
+    for c, h in enumerate(headers):
+        cell = t.cell(0, c); cell.width = Cm(1 if c == 0 or c in (1, 2) else 0.7)
+        cell.text = ''
+        shade(cell, tpl['primary'], (30,20,30,20))
+        pp = cell.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+        R(pp.add_run(h), size=9 if c > 2 else 11, bold=True, color=RGBColor(0xFF,0xFF,0xFF))
+    for i, name in enumerate(students, 1):
+        c0 = t.cell(i, 0); c0.width = Cm(1); c0.text = ''
+        set_rtl(c0.paragraphs[0], WD_ALIGN_PARAGRAPH.CENTER)
+        R(c0.paragraphs[0].add_run(str(i)), size=10)
+        c1 = t.cell(i, 1); c1.width = Cm(5); c1.text = ''
+        set_rtl(c1.paragraphs[0])
+        R(c1.paragraphs[0].add_run(name[:25]), size=10)
+        c2 = t.cell(i, 2); c2.width = Cm(2); c2.text = ''
+        set_rtl(c2.paragraphs[0], WD_ALIGN_PARAGRAPH.CENTER)
+        R(c2.paragraphs[0].add_run(' '), size=10)
+        for j in range(days):
+            cell = t.cell(i, 3 + j); cell.width = Cm(0.7); cell.text = ''
+            set_rtl(cell.paragraphs[0], WD_ALIGN_PARAGRAPH.CENTER)
+        for j in range(2):
+            cell = t.cell(i, 3 + days + j); cell.width = Cm(1.5); cell.text = ''
+            set_rtl(cell.paragraphs[0], WD_ALIGN_PARAGRAPH.CENTER)
+    p = doc.add_paragraph(); set_rtl(p); p.paragraph_format.space_before = Pt(15)
+    R(p.add_run('توقيع المعلم: _____________     توقيع المدير: _____________'), size=12)
+    return doc
+
+def build_grades(d, tpl):
+    doc = _new_doc(tpl)
+    _record_header(doc, d, tpl, 'كشف رصد الدرجات')
+    subjects = [s.strip() for s in d['subjects'].split(',') if s.strip()]
+    students = [s.strip() for s in d['students'].split('\n') if s.strip()]
+    if not students: students = ['—']
+    if not subjects: subjects = ['مادة']
+    ncols = 2 + len(subjects) + 3
+    t = doc.add_table(rows=len(students) + 2, cols=ncols)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER; t.autofit = False
+    headers = ['#', 'اسم الطالب'] + subjects + ['المجموع', 'النسبة', 'التقدير']
+    widths = [1, 5] + [2.2] * len(subjects) + [2, 2, 2]
+    for c, (h, w) in enumerate(zip(headers, widths)):
+        cell = t.cell(0, c); cell.width = Cm(w); cell.text = ''
+        shade(cell, tpl['primary'], (30,20,30,20))
+        pp = cell.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+        R(pp.add_run(h), size=10, bold=True, color=RGBColor(0xFF,0xFF,0xFF))
+    for i, name in enumerate(students, 1):
+        c0 = t.cell(i, 0); c0.width = Cm(1); c0.text = ''
+        set_rtl(c0.paragraphs[0], WD_ALIGN_PARAGRAPH.CENTER)
+        R(c0.paragraphs[0].add_run(str(i)), size=10)
+        c1 = t.cell(i, 1); c1.width = Cm(5); c1.text = ''
+        set_rtl(c1.paragraphs[0])
+        R(c1.paragraphs[0].add_run(name[:25]), size=10)
+        for j in range(len(subjects)):
+            cell = t.cell(i, 2 + j); cell.width = Cm(2.2); cell.text = ''
+        for j in range(3):
+            cell = t.cell(i, 2 + len(subjects) + j); cell.width = Cm(2); cell.text = ''
+    p = doc.add_paragraph(); set_rtl(p); p.paragraph_format.space_before = Pt(15)
+    R(p.add_run('توقيع المعلم: _____________     توقيع المدير: _____________'), size=12)
+    return doc
+
+def build_report_card(d, tpl):
+    doc = _new_doc(tpl)
+    _title(doc, d['school'], tpl['primary'], 18)
+    _title(doc, 'بطاقة تقييم الطالب', tpl['accent'], 20)
+    hrule(doc, tpl['primary'], 12)
+    _kv_table(doc, [
+        ('اسم الطالب', d['student'], 'الصف', d['class']),
+        ('العام الدراسي', d.get('year', datetime.now().year), 'رقم الجلوس', d.get('seat', '—')),
+    ], tpl, [3, 5.2, 3, 5.2])
+    doc.add_paragraph()
+    subjects = [s.strip() for s in d['subjects'].split(',') if s.strip()] or ['مادة']
+    t = doc.add_table(rows=len(subjects) + 2, cols=6)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER; t.autofit = False
+    headers = ['المادة', 'الفصل الأول', 'الفصل الثاني', 'المجموع', 'التقدير', 'ملاحظات']
+    widths = [4, 2.5, 2.5, 2.5, 2.5, 3]
+    for c, (h, w) in enumerate(zip(headers, widths)):
+        cell = t.cell(0, c); cell.width = Cm(w); cell.text = ''
+        shade(cell, tpl['primary'], (60,40,60,40))
+        pp = cell.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+        R(pp.add_run(h), size=11, bold=True, color=RGBColor(0xFF,0xFF,0xFF))
+    for i, subj in enumerate(subjects, 1):
+        c0 = t.cell(i, 0); c0.width = Cm(4); c0.text = ''
+        set_rtl(c0.paragraphs[0], WD_ALIGN_PARAGRAPH.CENTER)
+        R(c0.paragraphs[0].add_run(subj), size=11, bold=True,
+          color=RGBColor.from_string(tpl['primary']))
+        for j in range(5):
+            cell = t.cell(i, 1 + j); cell.width = Cm(widths[1+j]); cell.text = ''
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run('السلوك والمواظبة:  '), size=12, bold=True)
+    R(p.add_run(d.get('behavior', 'ممتاز')), size=12)
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run('ملاحظات المعلم:  '), size=12, bold=True)
+    R(p.add_run(d.get('notes', '—')), size=12)
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run('توقيع المعلم: _____________   توقيع ولي الأمر: _____________   توقيع المدير: _____________'), size=12)
+    return doc
+
+def build_timetable(d, tpl):
+    doc = _new_doc(tpl)
+    _record_header(doc, d, tpl, 'جدول الحصص الأسبوعي')
+    days = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس']
+    periods = d.get('periods', 6)
+    t = doc.add_table(rows=periods + 1, cols=len(days) + 1)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER; t.autofit = False
+    c0 = t.cell(0, 0); c0.width = Cm(2.5); c0.text = ''
+    shade(c0, tpl['primary'], (60,40,60,40))
+    pp = c0.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+    R(pp.add_run('الحصة'), size=11, bold=True, color=RGBColor(0xFF,0xFF,0xFF))
+    for c, day in enumerate(days, 1):
+        cell = t.cell(0, c); cell.width = Cm(2.8); cell.text = ''
+        shade(cell, tpl['primary'], (60,40,60,40))
+        pp = cell.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+        R(pp.add_run(day), size=11, bold=True, color=RGBColor(0xFF,0xFF,0xFF))
+    for r in range(1, periods + 1):
+        c0 = t.cell(r, 0); c0.width = Cm(2.5); c0.text = ''
+        shade(c0, tpl.get('table_fill'), (60,40,60,40))
+        pp = c0.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+        R(pp.add_run(f'الحصة {r}'), size=11, bold=True,
+          color=RGBColor.from_string(tpl['primary']))
+        for c in range(1, len(days) + 1):
+            cell = t.cell(r, c); cell.width = Cm(2.8); cell.text = ''
+            pp = cell.paragraphs[0]; set_rtl(pp, WD_ALIGN_PARAGRAPH.CENTER)
+            R(pp.add_run(' '), size=10)
+    return doc
+
+# ══════════════════════════════════════════════════════════════
+# المراسلات (3 أنواع)
+# ══════════════════════════════════════════════════════════════
+def build_letterhead(d, tpl):
+    doc = _new_doc(tpl, margins=(2, 2))
+    pr = RGBColor.from_string(tpl['primary']); ac = RGBColor.from_string(tpl['accent'])
+    _title(doc, d['org'], tpl['primary'], 22)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(d.get('subtitle', 'وزارة التربية والتعليم')), size=12,
+      color=RGBColor.from_string(tpl['accent']))
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(f"العنوان: {d.get('address', '—')}"), size=11)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(f"هاتف: {d.get('phone', '—')}  |  بريد: {d.get('email', '—')}"), size=11)
+    hrule(doc, tpl['primary'], 18)
+    hrule(doc, tpl['accent'], 6)
+    for _ in range(15):
+        doc.add_paragraph()
+    hrule(doc, tpl['accent'], 6)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(f"ص.ب: {d.get('pobox', '—')}   |   {d.get('website', '—')}"),
+      size=10, color=RGBColor(0x88, 0x88, 0x88))
+    return doc
+
+def build_notice(d, tpl):
+    doc = _new_doc(tpl)
+    pr = RGBColor.from_string(tpl['primary']); ac = RGBColor.from_string(tpl['accent'])
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(d['org']), size=16, bold=True, color=pr)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run('إعــــلان'), size=28, bold=True, color=ac)
+    hrule(doc, tpl['primary'], 12)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(d.get('subject', 'إعلان هام')), size=18, bold=True, color=pr)
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    p.paragraph_format.line_spacing = 1.5
+    R(p.add_run(d['body']), size=14)
+    for _ in range(2): doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run(f"التاريخ: {d['date']}"), size=12, bold=True)
+    for _ in range(2): doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run('الإدارة'), size=13, bold=True, color=pr)
+    return doc
+
+def build_parent_letter(d, tpl):
+    doc = _new_doc(tpl)
+    pr = RGBColor.from_string(tpl['primary'])
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(d['org']), size=16, bold=True, color=pr)
+    hrule(doc, tpl['primary'], 12)
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run(f"الرقم: {d.get('ref', '—')}"), size=12)
+    R(p.add_run(f"        التاريخ: {d['date']}"), size=12)
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run('إلى/ ولي أمر الطالب: '), size=13, bold=True)
+    R(p.add_run(d['student']), size=13)
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run('الموضوع: '), size=13, bold=True)
+    R(p.add_run(d['subject']), size=13)
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run('تحية طيبة وبعد،،'), size=13, bold=True)
+    doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    p.paragraph_format.line_spacing = 1.5
+    R(p.add_run(d['body']), size=13)
+    for _ in range(2): doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p)
+    R(p.add_run('وتفضلوا بقبول فائق الاحترام والتقدير.'), size=13)
+    for _ in range(3): doc.add_paragraph()
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run('المدير'), size=13, bold=True, color=pr)
+    p = doc.add_paragraph(); set_rtl(p, WD_ALIGN_PARAGRAPH.CENTER)
+    R(p.add_run(d.get('principal', '_____________')), size=12)
+    return doc
+
+# ══════════════════════════════════════════════════════════════
+# نافذة السؤال + لوحة الأسئلة
+# ══════════════════════════════════════════════════════════════
+class QuestionDialog:
+    def __init__(self, parent, existing=None):
+        self.top = tk.Toplevel(parent)
+        self.top.title('إضافة سؤال' if existing is None else 'تعديل سؤال')
+        self.top.geometry('560x640'); self.top.transient(parent); self.top.grab_set()
+        self.top.configure(bg='#eef2f7'); self.result = None
+        f = ttk.Frame(self.top, padding=15); f.pack(fill='both', expand=True)
+        ttk.Label(f, text='نص السؤال:').grid(row=0, column=0, sticky='ne', pady=6)
+        self.text = tk.Text(f, height=3, width=42, font=('Arial', 11), wrap='word')
+        self.text.grid(row=0, column=1, sticky='we', pady=6)
+        ttk.Label(f, text='النوع:').grid(row=1, column=0, sticky='e', pady=6)
+        self.qtype = tk.StringVar(value='mcq')
+        rbf = ttk.Frame(f); rbf.grid(row=1, column=1, sticky='w')
+        ttk.Radiobutton(rbf, text='اختيار متعدد', variable=self.qtype,
+                        value='mcq', command=self.toggle).pack(side='right', padx=5)
+        ttk.Radiobutton(rbf, text='مقالي', variable=self.qtype,
+                        value='essay', command=self.toggle).pack(side='right', padx=5)
+        ttk.Label(f, text='الدرجة:').grid(row=2, column=0, sticky='e', pady=6)
+        self.marks = ttk.Entry(f, width=15, font=('Arial', 11))
+        self.marks.grid(row=2, column=1, sticky='w', pady=6); self.marks.insert(0, '1')
+        self.opt_frame = ttk.LabelFrame(f, text='الخيارات (سطر لكل خيار)', padding=6)
+        self.opt_frame.grid(row=3, column=0, columnspan=2, sticky='we', pady=6)
+        self.options = tk.Text(self.opt_frame, height=4, width=50, font=('Arial', 11))
+        self.options.pack(fill='both', expand=True)
+        ttk.Label(self.opt_frame, text='رقم الإجابة الصحيحة (0-3):').pack(anchor='e', pady=(4,0))
+        self.answer_idx = ttk.Entry(self.opt_frame, width=10, font=('Arial', 11))
+        self.answer_idx.pack(anchor='e'); self.answer_idx.insert(0, '0')
+        self.essay_frame = ttk.LabelFrame(f, text='الإجابة المقالية', padding=6)
+        self.essay_frame.grid(row=4, column=0, columnspan=2, sticky='we', pady=6)
+        ttk.Label(self.essay_frame, text='عدد الأسطر:').pack(side='right', padx=5)
+        self.essay_lines = ttk.Entry(self.essay_frame, width=8, font=('Arial', 11))
+        self.essay_lines.pack(side='right'); self.essay_lines.insert(0, '3')
+        ttk.Label(self.essay_frame, text='الإجابة النموذجية:').pack(anchor='e', pady=(4,0))
+        self.model_ans = tk.Text(self.essay_frame, height=2, width=50, font=('Arial', 11))
+        self.model_ans.pack(fill='x')
+        btns = ttk.Frame(f); btns.grid(row=5, column=0, columnspan=2, pady=15)
+        ttk.Button(btns, text='حفظ', command=self.save).pack(side='right', padx=6)
+        ttk.Button(btns, text='إلغاء', command=self.top.destroy).pack(side='right', padx=6)
+        f.columnconfigure(1, weight=1)
+        if existing:
+            self.text.insert('1.0', existing['text'])
+            self.qtype.set(existing['type'])
+            self.marks.delete(0, 'end'); self.marks.insert(0, str(existing['marks']))
+            if existing['type'] == 'mcq':
+                self.options.insert('1.0', '\n'.join(existing.get('options', [])))
+                self.answer_idx.delete(0, 'end')
+                self.answer_idx.insert(0, str(existing.get('answer', 0)))
+            else:
+                self.essay_lines.delete(0, 'end')
+                self.essay_lines.insert(0, str(existing.get('lines', 3)))
+                if existing.get('model_answer'):
+                    self.model_ans.insert('1.0', existing['model_answer'])
+        self.toggle()
+
+    def toggle(self):
+        if self.qtype.get() == 'mcq':
+            self.opt_frame.grid(); self.essay_frame.grid_remove()
+        else:
+            self.opt_frame.grid_remove(); self.essay_frame.grid()
+
+    def save(self):
+        text = self.text.get('1.0', 'end').strip()
+        if not text: return messagebox.showerror('خطأ', 'أدخل نص السؤال', parent=self.top)
+        try: marks = float(self.marks.get())
+        except: return messagebox.showerror('خطأ', 'درجة غير صحيحة', parent=self.top)
+        q = {'text': text, 'type': self.qtype.get(), 'marks': marks}
+        if q['type'] == 'mcq':
+            opts = [o.strip() for o in self.options.get('1.0', 'end').splitlines() if o.strip()]
+            if len(opts) < 2: return messagebox.showerror('خطأ', 'خياران على الأقل', parent=self.top)
+            q['options'] = opts
+            try: q['answer'] = int(self.answer_idx.get())
+            except: q['answer'] = 0
+        else:
+            try: q['lines'] = int(self.essay_lines.get())
+            except: q['lines'] = 3
+            q['model_answer'] = self.model_ans.get('1.0', 'end').strip()
+        self.result = q; self.top.destroy()
+
+class QuestionsPanel(ttk.LabelFrame):
+    def __init__(self, parent):
+        super().__init__(parent, text='  الأسئلة  ', padding=6)
+        self.questions = []
+        bar = ttk.Frame(self); bar.pack(fill='x', pady=3)
+        ttk.Button(bar, text='➕', command=self.add).pack(side='right', padx=2)
+        ttk.Button(bar, text='✏️', command=self.edit).pack(side='right', padx=2)
+        ttk.Button(bar, text='🗑️', command=self.delete).pack(side='right', padx=2)
+        ttk.Button(bar, text='⬆️', command=lambda: self.move(-1)).pack(side='right', padx=2)
+        ttk.Button(bar, text='⬇️', command=lambda: self.move(1)).pack(side='right', padx=2)
+        pb = ttk.Frame(self); pb.pack(fill='x', pady=3)
+        ttk.Label(pb, text='تحميل نموذج:').pack(side='right', padx=4)
+        self.preset = ttk.Combobox(pb, values=list(PRESET_EXAMS.keys()),
+                                   state='readonly', width=22, font=('Arial', 10))
+        self.preset.pack(side='right', padx=4)
+        self.preset.current(0)
+        ttk.Button(pb, text='تحميل', command=self.load_preset).pack(side='right', padx=4)
+        self.total_lbl = ttk.Label(bar, text='المجموع: 0',
+                                   font=('Arial', 10, 'bold'), foreground='#C00000')
+        self.total_lbl.pack(side='left', padx=4)
+        cols = ('num', 'type', 'text', 'marks')
+        self.tree = ttk.Treeview(self, columns=cols, show='headings', height=5)
+        for c, txt, w, a in [('num','#',40,'center'),('type','النوع',100,'center'),
+                              ('text','السؤال',420,'e'),('marks','الدرجة',60,'center')]:
+            self.tree.heading(c, text=txt); self.tree.column(c, width=w, anchor=a)
+        self.tree.pack(fill='both', expand=True)
+        self.tree.bind('<Double-1>', lambda e: self.edit())
+
+    def add(self):
+        d = QuestionDialog(self.winfo_toplevel()); self.winfo_toplevel().wait_window(d.top)
+        if d.result: self.questions.append(d.result); self.refresh()
+
+    def edit(self):
+        sel = self.tree.selection()
+        if not sel: return
+        i = int(sel[0])
+        d = QuestionDialog(self.winfo_toplevel(), self.questions[i])
+        self.winfo_toplevel().wait_window(d.top)
+        if d.result: self.questions[i] = d.result; self.refresh()
+
+    def delete(self):
+        sel = self.tree.selection()
+        if sel and messagebox.askyesno('تأكيد', 'حذف السؤال؟'):
+            del self.questions[int(sel[0])]; self.refresh()
+
+    def move(self, d):
+        sel = self.tree.selection()
+        if not sel: return
+        i = int(sel[0]); j = i + d
+        if 0 <= j < len(self.questions):
+            self.questions[i], self.questions[j] = self.questions[j], self.questions[i]
+            self.refresh(); self.tree.selection_set(str(j))
+
+    def load_preset(self):
+        name = self.preset.get()
+        if messagebox.askyesno('تأكيد', f'استبدال الأسئلة بنموذج:\n"{name}"؟'):
+            self.questions = [dict(q) for q in PRESET_EXAMS[name]]; self.refresh()
+
+    def refresh(self):
+        for i in self.tree.get_children(): self.tree.delete(i)
+        total = 0
+        for i, q in enumerate(self.questions):
+            t = 'اختيار' if q['type'] == 'mcq' else 'مقالي'
+            self.tree.insert('', 'end', iid=str(i),
+                             values=(i + 1, t, q['text'][:60], q['marks']))
+            total += q['marks']
+        self.total_lbl.config(text=f'المجموع: {total:g}')
+
+# ══════════════════════════════════════════════════════════════
+# معاينة مصغّرة
+# ══════════════════════════════════════════════════════════════
+def draw_preview(canvas, tpl, kind):
+    w, h = 110, 150
+    canvas.delete('all')
+    pr = '#' + tpl['primary']; ac = '#' + tpl['accent']
+    canvas.create_rectangle(0, 0, w, h, fill='white', outline='#ccc')
+    if kind == 'cert':
+        canvas.create_rectangle(6, 6, w-6, h-6, outline=pr, width=2)
+        if tpl['border_style'] == 'double':
+            canvas.create_rectangle(10, 10, w-10, h-10, outline=pr, width=1)
+        if tpl.get('title_bar'):
+            canvas.create_rectangle(18, 22, w-18, 38, fill=pr, outline='')
+        else:
+            canvas.create_line(22, 32, w-22, 32, fill=pr, width=3)
+        canvas.create_line(28, 48, w-28, 48, fill=ac, width=2)
+        for y in [60, 72, 84]:
+            canvas.create_line(16, y, w-16, y, fill='#aaa')
+        if tpl['name_style'] == 'bar':
+            canvas.create_rectangle(18, 98, w-18, 112, fill=pr, outline='')
+        else:
+            canvas.create_line(18, 110, w-18, 110, fill=pr, width=2)
+        canvas.create_line(18, 126, w//2-2, 126, fill='#aaa')
+        canvas.create_line(w//2+2, 126, w-18, 126, fill='#aaa')
+        canvas.create_line(28, h-10, w-28, h-10, fill=ac, width=2)
+    elif kind in ('record', 'exam', 'letter'):
+        canvas.create_rectangle(6, 6, w-6, h-6, outline=pr, width=2)
+        if kind == 'letter':
+            canvas.create_line(14, 14, w-14, 14, fill=pr, width=2)
+            canvas.create_line(14, 20, w-14, 20, fill=ac, width=1)
+            for y in range(30, h-22, 8):
+                canvas.create_line(14, y, w-14, y, fill='#eee')
+            canvas.create_line(14, h-16, w-14, h-16, fill=ac, width=1)
+        else:
+            canvas.create_rectangle(12, 12, w-12, 26, fill=pr, outline='')
+            canvas.create_line(w//2-18, 34, w//2+18, 34, fill=ac, width=2)
+            for y in range(44, h-18, 10):
+                canvas.create_line(14, y, w-14, y, fill='#ddd')
+            if kind == 'record':
+                for y in [44, 54, 64, 74, 84, 94, 104, 114]:
+                    canvas.create_line(14, y, w-14, y, fill='#999')
+
+def make_card(parent, tpl, kind, on_select):
+    f = tk.Frame(parent, bg='white', highlightbackground='#d0d0d0', highlightthickness=2)
+    c = tk.Canvas(f, width=110, height=150, bg='white', highlightthickness=0)
+    c.pack(padx=6, pady=(6, 2))
+    draw_preview(c, tpl, kind)
+    lbl = tk.Label(f, text=tpl['name'], bg='white', font=('Arial', 9, 'bold'), fg='#333')
+    lbl.pack(pady=(0, 6))
+    for w in (f, c, lbl):
+        w.bind('<Button-1>', lambda e: on_select(tpl, f))
+        w.bind('<Enter>', lambda e: f.configure(cursor='hand2'))
+    return f
+
+# ══════════════════════════════════════════════════════════════
+# لوحة وثيقة عامة (قالب + نموذج + إنشاء)
+# ══════════════════════════════════════════════════════════════
+class DocPanel(ttk.Frame):
+    def __init__(self, parent, templates, form_builder, doc_builder,
+                 kind='exam', filename_prefix='document'):
+        super().__init__(parent)
+        self.templates = templates
+        self.builder = doc_builder
+        self.prefix = filename_prefix
+        self.selected_tpl = templates[0]
+        self.cards = []
+
+        ttk.Label(self, text='① اختر القالب',
+                  style='Header.TLabel').pack(anchor='e', padx=20, pady=(8, 2))
+        gallery = ttk.Frame(self); gallery.pack(pady=4)
+        for i, tpl in enumerate(templates):
+            card = make_card(gallery, tpl, kind, self.select)
+            card.grid(row=0, column=i, padx=4)
+            self.cards.append((tpl, card))
+        self.highlight()
+
+        ttk.Label(self, text='② املأ البيانات',
+                  style='Header.TLabel').pack(anchor='e', padx=20, pady=(8, 2))
+        form_frame = ttk.Frame(self); form_frame.pack(fill='both', expand=True,
+                                                       padx=20, pady=4)
+        self.get_data = form_builder(form_frame)
+
+        ttk.Button(self, text='💾  إنشاء الملف وحفظه كـ Word',
+                   style='Accent.TButton',
+                   command=self.generate).pack(pady=8)
+
+    def select(self, tpl, frame):
+        self.selected_tpl = tpl; self.highlight()
+
+    def highlight(self):
+        for tpl, card in self.cards:
+            if tpl is self.selected_tpl:
+                card.configure(highlightbackground='#' + tpl['primary'],
+                               highlightthickness=3)
+            else:
+                card.configure(highlightbackground='#d0d0d0', highlightthickness=2)
+
+    def generate(self):
+        data = self.get_data()
+        if data is None: return
+        try:
+            doc = self.builder(data, self.selected_tpl)
+            path = filedialog.asksaveasfilename(
+                defaultextension='.docx', filetypes=[('Word Document', '*.docx')],
+                initialfile=f"{self.prefix}.docx")
+            if not path: return
+            doc.save(path)
+            if messagebox.askyesno('تم', f'تم الحفظ:\n{path}\n\nفتح الملف؟'):
+                open_file(path)
+        except Exception as e:
+            messagebox.showerror('خطأ', f'{e}')
+
+# ─── Form builders ────────────────────────────────────────────
+def _entry(parent, label, default, row, col=0):
+    ttk.Label(parent, text=label).grid(row=row, column=col, sticky='e', padx=6, pady=3)
+    e = ttk.Entry(parent, font=('Arial', 11))
+    e.grid(row=row, column=col + 1, sticky='we', padx=6, pady=3)
+    e.insert(0, default); return e
+
+def form_exam(parent):
+    parent.columnconfigure(1, weight=1); parent.columnconfigure(3, weight=1)
+    f = lambda lbl, d, r, c: _entry(parent, lbl, d, r, c)
+    school   = f('اسم المدرسة:', 'مدرسة الأمل', 0, 0)
+    subject  = f('المادة:', 'الرياضيات', 0, 2)
+    grade    = f('الصف:', 'السادس', 1, 0)
+    duration = f('المدة:', 'ساعتان', 1, 2)
+    date     = f('التاريخ:', datetime.now().strftime('%Y-%m-%d'), 2, 0)
+    total    = f('الدرجة الكلية:', '100', 2, 2)
+    qp = QuestionsPanel(parent)
+    qp.grid(row=3, column=0, columnspan=4, sticky='we', pady=6)
+    def get_data():
+        if not qp.questions:
+            messagebox.showwarning('تنبيه', 'أضف سؤالاً أو حمّل نموذجاً.'); return None
+        return {'school': school.get() or '—', 'subject': subject.get() or '—',
+                'grade': grade.get() or '—', 'duration': duration.get() or '—',
+                'date': date.get() or '—', 'total': total.get() or '—',
+                'questions': qp.questions}
+    return get_data
+
+def form_cert(parent):
+    parent.columnconfigure(1, weight=1); parent.columnconfigure(3, weight=1)
+    org  = _entry(parent, 'اسم الجهة:', 'مدرسة الأمل', 0, 0)
+    name = _entry(parent, 'اسم المستفيد:', 'محمد أحمد', 0, 2)
+    date = _entry(parent, 'التاريخ:', datetime.now().strftime('%Y-%m-%d'), 1, 0)
+    ttk.Label(parent, text='نص الشهادة:').grid(row=2, column=0, sticky='ne', pady=4)
+    body = tk.Text(parent, height=5, font=('Arial', 11), wrap='word')
+    body.grid(row=2, column=1, columnspan=3, sticky='we', padx=6, pady=4)
+    body.insert('1.0', CERT_DEFAULT_BODY['thanks'])
+    def get_data():
+        return {'org': org.get() or '—', 'name': name.get() or '—',
+                'date': date.get() or '—', 'body': body.get('1.0','end').strip()}
+    return get_data
+
+def form_record_basic(parent, fields):
+    parent.columnconfigure(1, weight=1); parent.columnconfigure(3, weight=1)
+    entries = {}
+    for i, (key, label, default) in enumerate(fields):
+        r, c = i // 2, (i % 2) * 2
+        entries[key] = _entry(parent, label, default, r, c)
+    return entries
+
+def form_attendance(parent):
+    e = form_record_basic(parent, [
+        ('school', 'المدرسة:', 'مدرسة الأمل'),
+        ('class', 'الصف:', 'السادس/أ'),
+        ('year', 'العام:', str(datetime.now().year)),
+        ('days', 'عدد الأيام:', '30'),
+    ])
+    ttk.Label(parent, text='أسماء الطلاب (سطر لكل طالب):').grid(
+        row=3, column=0, columnspan=4, sticky='e', pady=4)
+    students = tk.Text(parent, height=6, font=('Arial', 11))
+    students.grid(row=4, column=0, columnspan=4, sticky='we', padx=6)
+    students.insert('1.0', 'أحمد محمد\nمحمد علي\nخالد سعيد\nعمر يوسف')
+    def get_data():
+        try: days = int(e['days'].get())
+        except: days = 30
+        return {'school': e['school'].get() or '—', 'class': e['class'].get() or '—',
+                'year': e['year'].get() or '—', 'days': days,
+                'students': students.get('1.0','end')}
+    return get_data
+
+def form_grades(parent):
+    e = form_record_basic(parent, [
+        ('school', 'المدرسة:', 'مدرسة الأمل'),
+        ('class', 'الصف:', 'السادس/أ'),
+        ('year', 'العام:', str(datetime.now().year)),
+        ('subjects', 'المواد (فاصلة):', 'رياضيات، علوم، عربي، إنجليزي'),
+    ])
+    ttk.Label(parent, text='أسماء الطلاب:').grid(row=3, column=0, columnspan=4,
+                                                 sticky='e', pady=4)
+    students = tk.Text(parent, height=6, font=('Arial', 11))
+    students.grid(row=4, column=0, columnspan=4, sticky='we', padx=6)
+    students.insert('1.0', 'أحمد محمد\nمحمد علي\nخالد سعيد')
+    def get_data():
+        return {'school': e['school'].get() or '—', 'class': e['class'].get() or '—',
+                'year': e['year'].get() or '—', 'subjects': e['subjects'].get(),
+                'students': students.get('1.0','end')}
+    return get_data
+
+def form_report_card(parent):
+    e = form_record_basic(parent, [
+        ('school', 'المدرسة:', 'مدرسة الأمل'),
+        ('student', 'اسم الطالب:', 'محمد أحمد'),
+        ('class', 'الصف:', 'السادس/أ'),
+        ('year', 'العام:', str(datetime.now().year)),
+        ('seat', 'رقم الجلوس:', '12345'),
+        ('subjects', 'المواد (فاصلة):', 'رياضيات، علوم، عربي، إنجليزي'),
+        ('behavior', 'السلوك:', 'ممتاز'),
+        ('notes', 'ملاحظات:', '—'),
+    ])
+    def get_data():
+        return {k: v.get() for k, v in e.items()}
+    return get_data
+
+def form_timetable(parent):
+    e = form_record_basic(parent, [
+        ('school', 'المدرسة:', 'مدرسة الأمل'),
+        ('class', 'الصف:', 'السادس/أ'),
+        ('year', 'العام:', str(datetime.now().year)),
+        ('periods', 'عدد الحصص يومياً:', '6'),
+    ])
+    def get_data():
+        try: p = int(e['periods'].get())
+        except: p = 6
+        return {'school': e['school'].get() or '—', 'class': e['class'].get() or '—',
+                'year': e['year'].get() or '—', 'periods': p}
+    return get_data
+
+def form_letterhead(parent):
+    e = form_record_basic(parent, [
+        ('org', 'اسم الجهة:', 'مدرسة الأمل الثانوية'),
+        ('subtitle', 'السطر الفرعي:', 'وزارة التربية والتعليم'),
+        ('address', 'العنوان:', 'الرياض - حي النخيل'),
+        ('phone', 'الهاتف:', '011-2345678'),
+        ('email', 'البريد:', 'info@school.edu'),
+        ('website', 'الموقع:', 'www.school.edu'),
+        ('pobox', 'ص.ب:', '12345'),
+    ])
+    def get_data(): return {k: v.get() for k, v in e.items()}
+    return get_data
+
+def form_notice(parent):
+    e = form_record_basic(parent, [
+        ('org', 'الجهة:', 'مدرسة الأمل'),
+        ('subject', 'عنوان الإعلان:', 'إعلان هام'),
+        ('date', 'التاريخ:', datetime.now().strftime('%Y-%m-%d')),
+    ])
+    ttk.Label(parent, text='نص الإعلان:').grid(row=2, column=0, sticky='ne', pady=4)
+    body = tk.Text(parent, height=8, font=('Arial', 11), wrap='word')
+    body.grid(row=2, column=1, columnspan=3, sticky='we', padx=6, pady=4)
+    body.insert('1.0', 'نحيطكم علماً بأنه سيعقد اجتماع أولياء الأمور يوم الخميس القادم الساعة العاشرة صباحاً في قاعة المدرسة. حضوركم يشرفنا.')
+    def get_data():
+        return {'org': e['org'].get() or '—', 'subject': e['subject'].get() or '—',
+                'date': e['date'].get() or '—', 'body': body.get('1.0','end').strip()}
+    return get_data
+
+def form_parent_letter(parent):
+    e = form_record_basic(parent, [
+        ('org', 'الجهة:', 'مدرسة الأمل'),
+        ('student', 'اسم الطالب:', 'محمد أحمد'),
+        ('subject', 'الموضوع:', 'بخصوص مستوى الطالب الدراسي'),
+        ('date', 'التاريخ:', datetime.now().strftime('%Y-%m-%d')),
+        ('ref', 'الرقم:', '—'),
+        ('principal', 'اسم المدير:', 'أ. سعيد'),
+    ])
+    ttk.Label(parent, text='نص الكتاب:').grid(row=3, column=0, sticky='ne', pady=4)
+    body = tk.Text(parent, height=6, font=('Arial', 11), wrap='word')
+    body.grid(row=3, column=1, columnspan=3, sticky='we', padx=6, pady=4)
+    body.insert('1.0', 'نود إعلامكم بمستوى ابنكم الدراسي المتميز، ونأمل استمرار المتابعة معه في المنزل. وتفضلوا بقبول فائق الاحترام.')
+    def get_data():
+        d = {k: v.get() for k, v in e.items()}
+        d['body'] = body.get('1.0','end').strip()
+        return d
+    return get_data
+
+# ══════════════════════════════════════════════════════════════
+# التطبيق الرئيسي — 4 أقسام
+# ══════════════════════════════════════════════════════════════
+class App:
+    def __init__(self, root):
+        self.root = root
+        root.title('مُنشئ الوثائق التربوية الشامل — 14 نوع جاهز')
+        root.geometry('1120x860'); root.configure(bg='#eef2f7')
+
+        style = ttk.Style(); style.theme_use('clam')
+        style.configure('TNotebook.Tab', padding=[18, 8], font=('Arial', 11, 'bold'))
+        style.configure('TLabel', background='#eef2f7', font=('Arial', 11))
+        style.configure('TButton', font=('Arial', 11, 'bold'), padding=5)
+        style.configure('Header.TLabel', font=('Arial', 13, 'bold'),
+                        foreground='#1F4E79', background='#eef2f7')
+        style.configure('Small.TLabel', font=('Arial', 9),
+                        foreground='#666', background='#eef2f7')
+        style.configure('Treeview', font=('Arial', 10), rowheight=26)
+        style.configure('Treeview.Heading', font=('Arial', 10, 'bold'))
+        style.configure('Accent.TButton', font=('Arial', 12, 'bold'),
+                        padding=8, foreground='white', background='#1F4E79')
+
+        main = ttk.Notebook(root); main.pack(fill='both', expand=True, padx=8, pady=8)
+
+        # ─── الاختبارات ──────────────────────────────────────
+        exams_nb = ttk.Notebook(main); main.add(exams_nb, text='📝 الاختبارات')
+        self._add_doc(exams_nb, 'ورقة امتحان', EXAM_TEMPLATES, form_exam,
+                      build_exam, 'exam', 'ورقة_امتحان')
+        self._add_doc(exams_nb, 'نموذج إجابة', EXAM_TEMPLATES, form_exam,
+                      build_answer_key, 'exam', 'نموذج_إجابة')
+        self._add_doc(exams_nb, 'ورقة إجابة OMR', EXAM_TEMPLATES, form_exam,
+                      build_omr, 'exam', 'ورقة_إجابة')
+
+        # ─── الشهادات ────────────────────────────────────────
+        certs_nb = ttk.Notebook(main); main.add(certs_nb, text='🏆 الشهادات')
+        for kind, title in [('thanks', 'شكر وتقدير'), ('excellence', 'تفوق'),
+                             ('participation', 'مشاركة'), ('completion', 'إتمام')]:
+            panel = DocPanel(certs_nb, CERT_TEMPLATES, form_cert,
+                             lambda d, t, k=kind: build_cert(d, t, k),
+                             kind='cert', filename_prefix=f'شهادة_{title}')
+            certs_nb.add(panel, text=title)
+
+        # ─── السجلات ─────────────────────────────────────────
+        records_nb = ttk.Notebook(main); main.add(records_nb, text='📋 السجلات')
+        self._add_doc(records_nb, 'كشف حضور', RECORD_TEMPLATES, form_attendance,
+                      build_attendance, 'record', 'كشف_حضور')
+        self._add_doc(records_nb, 'كشف درجات', RECORD_TEMPLATES, form_grades,
+                      build_grades, 'record', 'كشف_درجات')
+        self._add_doc(records_nb, 'بطاقة تقييم', RECORD_TEMPLATES, form_report_card,
+                      build_report_card, 'record', 'بطاقة_تقييم')
+        self._add_doc(records_nb, 'جدول حصص', RECORD_TEMPLATES, form_timetable,
+                      build_timetable, 'record', 'جدول_حصص')
+
+        # ─── المراسلات ───────────────────────────────────────
+        letters_nb = ttk.Notebook(main); main.add(letters_nb, text='📄 المراسلات')
+        self._add_doc(letters_nb, 'ترويسة رسمية', LETTER_TEMPLATES, form_letterhead,
+                      build_letterhead, 'letter', 'ترويسة_رسمية')
+        self._add_doc(letters_nb, 'إعلان مدرسي', LETTER_TEMPLATES, form_notice,
+                      build_notice, 'letter', 'إعلان')
+        self._add_doc(letters_nb, 'كتاب لأولياء الأمور', LETTER_TEMPLATES,
+                      form_parent_letter, build_parent_letter, 'letter', 'كتاب_ولي_أمر')
+
+    def _add_doc(self, nb, title, templates, form, builder, kind, prefix):
+        panel = DocPanel(nb, templates, form, builder, kind=kind, filename_prefix=prefix)
+        nb.add(panel, text=title)
+
+if __name__ == '__main__':
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
